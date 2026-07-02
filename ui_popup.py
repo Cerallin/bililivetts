@@ -282,6 +282,20 @@ class _GdiplusTextCache:
         )
         return int(out_rect.Height + 0.5)
 
+    def measure_width(self, text, font_name, font_size, bold):
+        """测量单行文本的像素宽度。"""
+        if not self.gp_graphics or not text:
+            return 0
+        gp_font = self.get_font(font_name, font_size, bold)
+        layout_rect = _RectF(0.0, 0.0, 10000.0, 100.0)
+        out_rect = _RectF()
+        ctypes.windll.gdiplus.GdipMeasureString(
+            self.gp_graphics, ctypes.c_wchar_p(text), -1,
+            gp_font, ctypes.byref(layout_rect), self.gp_format,
+            ctypes.byref(out_rect), None, None
+        )
+        return int(out_rect.Width + 0.5)
+
     def draw_wrapped(self, text, x, y, max_width, font_name, font_size,
                      bold, r, g, b):
         """在指定宽度内绘制自动换行的文本。"""
@@ -483,6 +497,8 @@ class DanmakuInteractionFrame(wx.MiniFrame):
         self._input_focused = False
         self._hover_close = False
         self._needs_render = True  # 脏标记，避免无效渲染
+        self._cursor_visible = True  # 光标闪烁状态
+        self._cursor_tick = 0  # 光标闪烁计数器（每 10 tick = 500ms 翻转一次）
 
         # 窗口尺寸（可使用上次保存的值）
         self._width = max(self.MIN_WIDTH, initial_width)
@@ -532,10 +548,10 @@ class DanmakuInteractionFrame(wx.MiniFrame):
         # 事件
         self._bind_events()
 
-        # 渲染定时器（500ms 兜底刷新，主动变更时直接调 _render_and_update）
+        # 渲染定时器（50ms 高刷，光标闪烁 500ms 周期，输入即时渲染）
         self._render_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._on_render_timer, self._render_timer)
-        self._render_timer.Start(500)
+        self._render_timer.Start(50)
 
     # ==================================================================
     # 底部输入子窗 UI
@@ -578,10 +594,10 @@ class DanmakuInteractionFrame(wx.MiniFrame):
 
         self._input_frame.Layout()
 
-        # 使输入子窗背景半透明（使用 LWA_ALPHA 全局 alpha）
+        # 使输入子窗近乎不可见（仅保留交互/IME 能力），文字由主窗 DIB 手绘
         _make_layered(self._input_frame.GetHandle())
         _user32.SetLayeredWindowAttributes(
-            self._input_frame.GetHandle(), 0, self._bg_opacity, 0x02)
+            self._input_frame.GetHandle(), 0, 1, 0x02)
 
         # 输入子窗事件
         self._input_ctrl.Bind(wx.EVT_TEXT, self._on_input_change)
@@ -881,8 +897,13 @@ class DanmakuInteractionFrame(wx.MiniFrame):
     # ----- 定时渲染 -----
 
     def _on_render_timer(self, event):
-        # 兜底刷新：只有消息滚动等视觉变化时才渲染
-        if self._needs_render:
+        # 光标闪烁（每 10 tick = 500ms 翻转一次）
+        self._cursor_tick += 1
+        if self._cursor_tick >= 10:
+            self._cursor_tick = 0
+            self._cursor_visible = not self._cursor_visible
+        # 聚焦时持续刷新（光标闪烁），或有脏标记时渲染
+        if self._needs_render or self._input_focused:
             self._needs_render = False
             self._render_and_update()
 
@@ -934,7 +955,7 @@ class DanmakuInteractionFrame(wx.MiniFrame):
         if msg_h > 0:
             if self._msg_list.is_empty:
                 tc.draw("展示本场直播的弹幕互动消息", 12, msg_y + 10,
-                        "微软雅黑", 10, False, 0x88, 0x88, 0x88)
+                        "微软雅黑", 10, False, 255, 255, 255)
             else:
                 self._msg_list.draw(tc, msg_y + 4, cw, msg_h)
 
@@ -942,6 +963,30 @@ class DanmakuInteractionFrame(wx.MiniFrame):
             line_margin = int(cw * 0.05)
             tc.draw_line(line_margin, input_y, cw - line_margin, input_y,
                          255, 255, 255, 80, 1.0)
+
+        # 输入区文字（纯白，完全不透明，不受窗口透明度影响）
+        input_text = self._input_ctrl.GetValue()
+        if input_text:
+            tc.draw(input_text, 8, input_y + 7,
+                    "微软雅黑", 10, False, 255, 255, 255)
+            # 光标（文字后）
+            if self._cursor_visible and self._input_focused:
+                text_w = tc.measure_width(input_text, "微软雅黑", 10, False)
+                cursor_x = 8 + text_w + 2
+                tc.draw_line(cursor_x, input_y + 6,
+                             cursor_x, input_y + 28,
+                             255, 255, 255, self._bg_opacity, 2.0)
+        elif self._input_focused:
+            # 聚焦无文字：placeholder 始终显示，光标叠加闪烁
+            tc.draw("请输入文字", 8, input_y + 7,
+                    "微软雅黑", 10, False, 120, 120, 120)
+            if self._cursor_visible:
+                tc.draw_line(10, input_y + 6, 10, input_y + 28,
+                             255, 255, 255, self._bg_opacity, 2.0)
+        else:
+            # 未聚焦无文字：仅 placeholder
+            tc.draw("请输入文字", 8, input_y + 7,
+                    "微软雅黑", 10, False, 120, 120, 120)
 
         tc.end()
 
@@ -974,6 +1019,8 @@ class DanmakuInteractionFrame(wx.MiniFrame):
             self._input_ctrl.SetInsertionPoint(self.MAX_INPUT_LENGTH)
             self._char_count.SetLabel(
                 f"{self.MAX_INPUT_LENGTH}/{self.MAX_INPUT_LENGTH}")
+        self._needs_render = True
+        self._render_and_update()  # 即时渲染，消除输入延迟
         event.Skip()
 
     def _on_send_click(self, event):
@@ -985,10 +1032,13 @@ class DanmakuInteractionFrame(wx.MiniFrame):
 
     def _on_input_focus_in(self, event):
         self._input_focused = True
+        self._cursor_visible = True
+        self._needs_render = True
         event.Skip()
 
     def _on_input_focus_out(self, event):
         self._input_focused = False
+        self._needs_render = True
         event.Skip()
 
     # ==================================================================
@@ -1014,11 +1064,7 @@ class DanmakuInteractionFrame(wx.MiniFrame):
         """设置背景透明度 (0-255)，仅影响窗口背景，文字始终不透明。"""
         self._bg_opacity = max(30, min(255, int(alpha)))
         self._needs_render = True
-        try:
-            _user32.SetLayeredWindowAttributes(
-                self._input_frame.GetHandle(), 0, self._bg_opacity, 0x02)
-        except Exception:
-            pass
+        # 输入子窗保持近乎不可见，文字由主窗 DIB 手绘
 
     def set_on_send_callback(self, on_send):
         self._send_callback = on_send
