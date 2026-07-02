@@ -499,6 +499,7 @@ class DanmakuInteractionFrame(wx.MiniFrame):
         self._needs_render = True  # 脏标记，避免无效渲染
         self._cursor_visible = True  # 光标闪烁状态
         self._cursor_tick = 0  # 光标闪烁计数器（每 10 tick = 500ms 翻转一次）
+        self._last_insertion_point = 0  # 追踪插入点变化，变化时重置光标可见
 
         # 窗口尺寸（可使用上次保存的值）
         self._width = max(self.MIN_WIDTH, initial_width)
@@ -605,6 +606,7 @@ class DanmakuInteractionFrame(wx.MiniFrame):
         self._input_ctrl.Bind(wx.EVT_TEXT_ENTER, self._on_send_click)
         self._input_ctrl.Bind(wx.EVT_SET_FOCUS, self._on_input_focus_in)
         self._input_ctrl.Bind(wx.EVT_KILL_FOCUS, self._on_input_focus_out)
+        self._input_ctrl.Bind(wx.EVT_KEY_UP, self._on_input_key_up)
 
         # 面板边缘调整大小事件（底部边缘由输入框面板覆盖，需在此处理）
         panel.Bind(wx.EVT_LEFT_DOWN, self._on_input_panel_left_down)
@@ -903,6 +905,17 @@ class DanmakuInteractionFrame(wx.MiniFrame):
         if self._cursor_tick >= 10:
             self._cursor_tick = 0
             self._cursor_visible = not self._cursor_visible
+        # 检测插入点是否因鼠标点击等改变了（非按键触发的情况）
+        if self._input_focused:
+            try:
+                new_ip = self._input_ctrl.GetInsertionPoint()
+                if new_ip != self._last_insertion_point:
+                    self._last_insertion_point = new_ip
+                    self._cursor_visible = True
+                    self._cursor_tick = 0
+                    self._needs_render = True
+            except Exception:
+                pass
         # 聚焦时持续刷新（光标闪烁），或有脏标记时渲染
         if self._needs_render or self._input_focused:
             self._needs_render = False
@@ -969,12 +982,17 @@ class DanmakuInteractionFrame(wx.MiniFrame):
         input_text = self._input_ctrl.GetValue()
         # placeholder 颜色随背景透明度变化
         ph_gray = int(((255 - 128) * self._bg_opacity / 255) + 128)
+        try:
+            ip = self._input_ctrl.GetInsertionPoint()
+        except Exception:
+            ip = len(input_text)
         if input_text:
             tc.draw(input_text, 8, input_y + 7,
                     "微软雅黑", 10, False, 255, 255, 255)
-            # 光标（文字后）
+            # 光标（根据实际插入点位置，而非始终在末尾）
             if self._cursor_visible and self._input_focused:
-                text_w = tc.measure_width(input_text, "微软雅黑", 10, False)
+                prefix = input_text[:ip]
+                text_w = tc.measure_width(prefix, "微软雅黑", 10, False)
                 cursor_x = 8 + text_w + 2
                 tc.draw_line(cursor_x, input_y + 6,
                              cursor_x, input_y + 28,
@@ -1022,6 +1040,13 @@ class DanmakuInteractionFrame(wx.MiniFrame):
             self._input_ctrl.SetInsertionPoint(self.MAX_INPUT_LENGTH)
             self._char_count.SetLabel(
                 f"{self.MAX_INPUT_LENGTH}/{self.MAX_INPUT_LENGTH}")
+        # 文本变化时插入点通常后移，重置光标闪烁
+        try:
+            self._last_insertion_point = self._input_ctrl.GetInsertionPoint()
+        except Exception:
+            pass
+        self._cursor_visible = True
+        self._cursor_tick = 0
         self._needs_render = True
         self._render_and_update()  # 即时渲染，消除输入延迟
         event.Skip()
@@ -1031,6 +1056,7 @@ class DanmakuInteractionFrame(wx.MiniFrame):
         if text:
             self._input_ctrl.SetValue("")
             self._char_count.SetLabel("0/40")
+            self._last_insertion_point = 0
             self._send_callback(text)
 
     def _on_input_focus_in(self, event):
@@ -1042,6 +1068,23 @@ class DanmakuInteractionFrame(wx.MiniFrame):
     def _on_input_focus_out(self, event):
         self._input_focused = False
         self._needs_render = True
+        event.Skip()
+
+    def _on_input_key_up(self, event):
+        """按键抬起时检测插入点是否移动，立即刷新光标位置并重置闪烁。"""
+        key = event.GetKeyCode()
+        # 方向键、Home/End、鼠标点击等会改变插入点
+        if key in (wx.WXK_LEFT, wx.WXK_RIGHT, wx.WXK_UP, wx.WXK_DOWN,
+                   wx.WXK_HOME, wx.WXK_END):
+            try:
+                new_ip = self._input_ctrl.GetInsertionPoint()
+                if new_ip != self._last_insertion_point:
+                    self._last_insertion_point = new_ip
+                    self._cursor_visible = True
+                    self._cursor_tick = 0
+                    self._needs_render = True
+            except Exception:
+                pass
         event.Skip()
 
     # ==================================================================
