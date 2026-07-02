@@ -583,7 +583,8 @@ class DanmakuInteractionFrame(wx.MiniFrame):
         )
 
         input_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        input_sizer.Add(self._input_ctrl, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 4)
+        input_sizer.Add(self._input_ctrl, 1,
+                        wx.ALIGN_CENTER_VERTICAL | wx.ALL, 4)
         input_sizer.Add(self._char_count, 0,
                         wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
         panel.SetSizer(input_sizer)
@@ -966,6 +967,8 @@ class DanmakuInteractionFrame(wx.MiniFrame):
 
         # 输入区文字（纯白，完全不透明，不受窗口透明度影响）
         input_text = self._input_ctrl.GetValue()
+        # placeholder 颜色随背景透明度变化
+        ph_gray = int(((255 - 128) * self._bg_opacity / 255) + 128)
         if input_text:
             tc.draw(input_text, 8, input_y + 7,
                     "微软雅黑", 10, False, 255, 255, 255)
@@ -979,14 +982,14 @@ class DanmakuInteractionFrame(wx.MiniFrame):
         elif self._input_focused:
             # 聚焦无文字：placeholder 始终显示，光标叠加闪烁
             tc.draw("请输入文字", 8, input_y + 7,
-                    "微软雅黑", 10, False, 120, 120, 120)
+                    "微软雅黑", 10, False, ph_gray, ph_gray, ph_gray)
             if self._cursor_visible:
                 tc.draw_line(10, input_y + 6, 10, input_y + 28,
                              255, 255, 255, self._bg_opacity, 2.0)
         else:
             # 未聚焦无文字：仅 placeholder
             tc.draw("请输入文字", 8, input_y + 7,
-                    "微软雅黑", 10, False, 120, 120, 120)
+                    "微软雅黑", 10, False, ph_gray, ph_gray, ph_gray)
 
         tc.end()
 
