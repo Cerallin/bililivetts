@@ -500,6 +500,7 @@ class DanmakuInteractionFrame(wx.MiniFrame):
         self._cursor_visible = True  # 光标闪烁状态
         self._cursor_tick = 0  # 光标闪烁计数器（每 10 tick = 500ms 翻转一次）
         self._last_insertion_point = 0  # 追踪插入点变化，变化时重置光标可见
+        self._clicked_in_window = False  # 追踪用户是否在本窗口内点击，用于 _on_activate
 
         # 窗口尺寸（可使用上次保存的值）
         self._width = max(self.MIN_WIDTH, initial_width)
@@ -684,6 +685,7 @@ class DanmakuInteractionFrame(wx.MiniFrame):
             if not self.HasCapture():
                 self.CaptureMouse()
         else:
+            self._clicked_in_window = True  # 用户在消息区点击，允许后续自动聚焦
             self._focus_input()
             event.Skip()
 
@@ -697,8 +699,9 @@ class DanmakuInteractionFrame(wx.MiniFrame):
 
     def _on_activate(self, event):
         """窗口被激活时自动聚焦输入框。"""
-        if event.GetActive():
+        if event.GetActive() and self._clicked_in_window:
             wx.CallAfter(self._focus_input)
+            self._clicked_in_window = False
         event.Skip()
 
     def _on_left_up(self, event):
@@ -1021,10 +1024,6 @@ class DanmakuInteractionFrame(wx.MiniFrame):
         if getattr(self, '_prev_hbmp', None):
             _gdi32.DeleteObject(self._prev_hbmp)
         self._prev_hbmp = hbmp
-        try:
-            self._input_frame.Raise()
-        except Exception:
-            pass
 
     # ==================================================================
     # 输入子窗事件
