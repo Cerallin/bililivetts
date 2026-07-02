@@ -13,7 +13,7 @@ import time
 import wx
 
 from bili_client import BiliDanmakuClient, BlivedmDanmakuClient, send_danmaku_to_room
-from tts_engine import TtsClient, AudioPlayer
+from tts_engine import TtsClient, GptSovitsClient, AudioPlayer
 from ui_popup import PopupTtsFrame, DanmakuInteractionFrame
 
 LOG_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -48,9 +48,10 @@ class LiveTtsFrame(wx.Frame):
 
     def _build_ui(self):
         panel = wx.Panel(self)
+        self._panel = panel  # 保存引用，用于后续 Layout
         main_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        grid = wx.FlexGridSizer(7, 2, 10, 10)
+        grid = wx.FlexGridSizer(10, 2, 10, 10)
         grid.AddGrowableCol(1, 1)
 
         grid.Add(
@@ -77,8 +78,21 @@ class LiveTtsFrame(wx.Frame):
         self.bili_jct_input = wx.TextCtrl(panel, style=wx.TE_PASSWORD)
         grid.Add(self.bili_jct_input, 1, wx.EXPAND)
 
+        # TTS 后端选择
         grid.Add(
-            wx.StaticText(panel, label="TTS 语音："), 0, wx.ALIGN_CENTER_VERTICAL
+            wx.StaticText(panel, label="TTS 后端："), 0, wx.ALIGN_CENTER_VERTICAL
+        )
+        self.tts_backend_choice = wx.Choice(
+            panel,
+            choices=["edge-tts", "GPT-SoVITS"],
+        )
+        self.tts_backend_choice.SetSelection(0)
+        grid.Add(self.tts_backend_choice, 1, wx.EXPAND)
+
+        self._voice_label = wx.StaticText(panel, label="TTS 语音：")
+        grid.Add(
+            self._voice_label,
+            0, wx.ALIGN_CENTER_VERTICAL
         )
         self.voice_choice = wx.Choice(
             panel,
@@ -91,6 +105,31 @@ class LiveTtsFrame(wx.Frame):
         )
         self.voice_choice.SetSelection(0)
         grid.Add(self.voice_choice, 1, wx.EXPAND)
+
+        # GPT-SoVITS 配置（仅在 GPT-SoVITS 后端时显示）
+        self._gs_label_url = wx.StaticText(panel, label="GPT-SoVITS API 地址：")
+        grid.Add(self._gs_label_url, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.gs_url_input = wx.TextCtrl(panel)
+        self.gs_url_input.SetValue("http://127.0.0.1:9880")
+        grid.Add(self.gs_url_input, 1, wx.EXPAND)
+
+        self._gs_label_ref = wx.StaticText(panel, label="GPT-SoVITS 参考音频路径：")
+        grid.Add(self._gs_label_ref, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.gs_ref_audio_input = wx.TextCtrl(panel)
+        grid.Add(self.gs_ref_audio_input, 1, wx.EXPAND)
+
+        self._gs_label_prompt = wx.StaticText(panel, label="GPT-SoVITS 提示文本：")
+        grid.Add(self._gs_label_prompt, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.gs_prompt_text_input = wx.TextCtrl(panel)
+        grid.Add(self.gs_prompt_text_input, 1, wx.EXPAND)
+
+        # 初始隐藏 GPT-SoVITS 配置行
+        self._gs_label_url.Hide()
+        self.gs_url_input.Hide()
+        self._gs_label_ref.Hide()
+        self.gs_ref_audio_input.Hide()
+        self._gs_label_prompt.Hide()
+        self.gs_prompt_text_input.Hide()
 
         grid.Add(wx.StaticText(panel, label="说明："), 0, wx.ALIGN_TOP)
         self.hint_text = wx.StaticText(
@@ -164,6 +203,10 @@ class LiveTtsFrame(wx.Frame):
         self.sessdata_input.Bind(wx.EVT_TEXT, self._on_field_change)
         self.bili_jct_input.Bind(wx.EVT_TEXT, self._on_field_change)
         self.voice_choice.Bind(wx.EVT_CHOICE, self._on_voice_change)
+        self.tts_backend_choice.Bind(wx.EVT_CHOICE, self._on_tts_backend_change)
+        self.gs_url_input.Bind(wx.EVT_TEXT, self._on_field_change)
+        self.gs_ref_audio_input.Bind(wx.EVT_TEXT, self._on_field_change)
+        self.gs_prompt_text_input.Bind(wx.EVT_TEXT, self._on_field_change)
 
     # ------------------------------------------------------------------
     # 弹幕监听
@@ -172,7 +215,6 @@ class LiveTtsFrame(wx.Frame):
     def on_start(self, event):
         room_id = self.room_input.GetValue().strip()
         watch_uid = self.uid_input.GetValue().strip()
-        voice = self.voice_choice.GetStringSelection()
         if not room_id:
             self._log("请填写直播间号")
             return
@@ -200,7 +242,6 @@ class LiveTtsFrame(wx.Frame):
                 on_log=self._log,
                 on_disconnect=self._on_disconnect,
             )
-        self._current_tts_voice = voice
         self.danmaku_client.start()
 
         # 如果互动窗口已打开，清空旧消息
@@ -214,9 +255,8 @@ class LiveTtsFrame(wx.Frame):
         self._stop_listening()
 
     def on_test_tts(self, event):
-        voice = self.voice_choice.GetStringSelection()
         self._log("开始 TTS 测试...")
-        self._play_text("测试。麦克风测试。", voice)
+        self._play_text("测试。麦克风测试。")
 
     # ------------------------------------------------------------------
     # 弹幕回调
@@ -228,7 +268,7 @@ class LiveTtsFrame(wx.Frame):
         # 当目标用户 UID 为空或为 "0" 时，不播报 TTS
         watch_uid = self.uid_input.GetValue().strip()
         if watch_uid and watch_uid != "0":
-            self._play_text(content, self.voice_choice.GetStringSelection())
+            self._play_text(content)
 
         # 转发到互动窗口
         if self._interaction_frame is not None:
@@ -237,10 +277,30 @@ class LiveTtsFrame(wx.Frame):
             except Exception:
                 pass
 
-    def _play_text(self, text, voice):
+    def _play_text(self, text):
+        backend = self.tts_backend_choice.GetStringSelection()
+
+        # 在主线程预先取出所有 GUI 控件的值，避免子线程访问 wx 控件导致闪退
+        if backend == "GPT-SoVITS":
+            api_url = self.gs_url_input.GetValue().strip()
+            ref_audio = self.gs_ref_audio_input.GetValue().strip()
+            prompt_text_val = self.gs_prompt_text_input.GetValue().strip()
+        else:
+            voice = self.voice_choice.GetStringSelection()
+
         def run():
             try:
-                tts = TtsClient(voice)
+                if backend == "GPT-SoVITS":
+                    if not api_url:
+                        self._log("GPT-SoVITS API 地址未设置")
+                        return
+                    tts = GptSovitsClient(
+                        api_url=api_url,
+                        ref_audio_path=ref_audio,
+                        prompt_text=prompt_text_val,
+                    )
+                else:
+                    tts = TtsClient(voice)
                 audio_bytes = tts.synthesize(text)
                 self._audio_player.enqueue(audio_bytes)
             except Exception as ex:
@@ -292,7 +352,7 @@ class LiveTtsFrame(wx.Frame):
             return
         self._log(f"互动窗口输入: {text}")
         # TTS 语音播报（无论是否监听中都播放）
-        self._play_text(text, self.voice_choice.GetStringSelection())
+        self._play_text(text)
         # 仅在监听运行中时才同步发布弹幕到直播间
         if self.danmaku_client is None:
             self._log("未启动监听，仅 TTS 播报，不发送弹幕")
@@ -365,6 +425,10 @@ class LiveTtsFrame(wx.Frame):
         sessdata = cfg.get('sessdata', '')
         bili_jct = cfg.get('bili_jct', '')
         voice = cfg.get('voice', '')
+        tts_backend = cfg.get('tts_backend', 'edge-tts')
+        gs_url = cfg.get('gs_url', 'http://127.0.0.1:9880')
+        gs_ref_audio = cfg.get('gs_ref_audio', '')
+        gs_prompt_text = cfg.get('gs_prompt_text', '')
         opacity = cfg.get('popup_opacity', 230)
         volume = cfg.get('volume', 100)
         self._interaction_win_width = int(cfg.get('interaction_win_width', 400))
@@ -381,6 +445,17 @@ class LiveTtsFrame(wx.Frame):
                     self.voice_choice.SetSelection(idx)
                 except ValueError:
                     pass
+            # TTS 后端
+            if tts_backend:
+                try:
+                    idx = self.tts_backend_choice.GetItems().index(tts_backend)
+                    self.tts_backend_choice.SetSelection(idx)
+                except ValueError:
+                    pass
+            self.gs_url_input.SetValue(gs_url)
+            self.gs_ref_audio_input.SetValue(gs_ref_audio)
+            self.gs_prompt_text_input.SetValue(gs_prompt_text)
+            self._apply_tts_backend_visibility()
             self._popup_opacity = int(opacity)
             self.opacity_slider.SetValue(self._popup_opacity)
             self.opacity_label.SetLabel(
@@ -401,6 +476,10 @@ class LiveTtsFrame(wx.Frame):
             'sessdata': self.sessdata_input.GetValue().strip(),
             'bili_jct': self.bili_jct_input.GetValue().strip(),
             'voice': self.voice_choice.GetStringSelection(),
+            'tts_backend': self.tts_backend_choice.GetStringSelection(),
+            'gs_url': self.gs_url_input.GetValue().strip(),
+            'gs_ref_audio': self.gs_ref_audio_input.GetValue().strip(),
+            'gs_prompt_text': self.gs_prompt_text_input.GetValue().strip(),
             'popup_opacity': self._popup_opacity,
             'volume': self._volume,
             'interaction_win_width': self._interaction_win_width,
@@ -427,6 +506,26 @@ class LiveTtsFrame(wx.Frame):
     def _on_voice_change(self, event):
         self._save_config()
         event.Skip()
+
+    def _on_tts_backend_change(self, event):
+        self._apply_tts_backend_visibility()
+        self._save_config()
+        event.Skip()
+
+    def _apply_tts_backend_visibility(self):
+        """根据当前选择的 TTS 后端显示/隐藏对应配置行。"""
+        backend = self.tts_backend_choice.GetStringSelection()
+        is_edge = (backend == "edge-tts")
+        # edge-tts：显示语音选择；GPT-SoVITS：显示 API 配置
+        self._voice_label.Show(is_edge)
+        self.voice_choice.Show(is_edge)
+        self._gs_label_url.Show(not is_edge)
+        self.gs_url_input.Show(not is_edge)
+        self._gs_label_ref.Show(not is_edge)
+        self.gs_ref_audio_input.Show(not is_edge)
+        self._gs_label_prompt.Show(not is_edge)
+        self.gs_prompt_text_input.Show(not is_edge)
+        self._panel.Layout()
 
     def _on_close(self, event):
         # 关闭子窗口（必须用 Close() 而非 Destroy()，否则 EVT_CLOSE 不会触发，
